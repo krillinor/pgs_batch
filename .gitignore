@@ -2,6 +2,5 @@
 
 !.gitignore
 !README.md
-!custom.config
 !pgs_all_metadata_scores_20240510.csv
 !*.R

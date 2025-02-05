@@ -22,13 +22,13 @@ DEFAULT_MAX_CPUS <- 16
 DEFAULT_MAX_MEMORY <- "128.GB"
 DEFAULT_MIN_OVERLAP <- 0
 
-str_glue("
+doc <- str_glue("
 Usage:
 
   pgs_batch.R batch (--n_batches=<n_batches> | --n_per_batch=<n_per_batch>) [--dir=<dir> --force]
   pgs_batch.R download --batch_id=<batch_id> [--dir=<dir> --target_build=<target_build> --resume]
   pgs_batch.R create_samplesheet --id=<id> --genos_path_prefix=<genos_path_prefix> --format=<format> [--dir=<dir> --genos_single_file]
-  pgs_batch.R calc --id=<id> --batch_id=<batch_id> [--dir=<dir> --profile=<profile> --target_build=<target_build> --min_overlap=<min_overlap> --ancestry=<ancestry> --max_cpus=<max_cpus> --max_memory=<max_memory> --custom_config --resume --extra_args=<extra_args> --offline --singularity_bin=<singularity_bin> --nxf_ver=<nxf_ver> --pgsc_calc_version=<pgsc_calc_version> --nxf_cachedir=<nxf_cachedir>]
+  pgs_batch.R calc --id=<id> --batch_id=<batch_id> [--dir=<dir> --profile=<profile> --target_build=<target_build> --min_overlap=<min_overlap> --ancestry=<ancestry> --max_cpus=<max_cpus> --max_memory=<max_memory> --resume --extra_args=<extra_args> --offline --singularity_bin=<singularity_bin> --nxf_ver=<nxf_ver> --pgsc_calc_version=<pgsc_calc_version> --nxf_cachedir=<nxf_cachedir>]
   pgs_batch.R get_ancestry_reference (--1kg | --1kg_hgdp) [--dir=<dir>]
   pgs_batch.R (-h | --help)
   pgs_batch.R --version
@@ -61,7 +61,7 @@ Options:
   --pgsc_calc_version=<pgsc_calc_version>  pgsc_calc version [default: {DEFAULT_PGSC_CALC_VERSION}]
   --nxf_cachedir=<nxf_cachedir>            Cache directory for nextflow.
 
-") -> doc
+")
 
 
 #' Initialize directories and environment
@@ -211,6 +211,11 @@ get_ancestry_reference <- function(args) {
 #' @param args Command line arguments
 #' @return NULL
 run_calc <- function(args) {
+    # Require custom.config file
+    if (!file_exists(str_glue("{args$dir}/custom.config"))) {
+        message(str_glue("You have to provide the file {args$dir}/custom.config where you specify resources to run this pipeline.\nSee https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html for more details."))
+    }
+
     # Validate ancestry reference if provided
     if (!is.null(args$ancestry) && !file_exists(args$ancestry)) {
         stop("Ancestry reference file does not exist")
@@ -226,8 +231,7 @@ run_calc <- function(args) {
         ancestry = if (!is.null(args$ancestry)) str_glue(" --run_ancestry {args$ancestry}") else "",
         input = str_glue("{args$dir}/samplesheet_{args$id}.csv"),
         scores = str_glue("--scorefile \"{args$dir}/scoringfiles/batch{args$batch_id}/*{args$target_build}.txt.gz\""),
-        # TODO error if no config file specified
-        config = if (args$custom_config) str_glue(" -c {args$dir}/custom.config") else "",
+        config = str_glue(" -c {args$dir}/custom.config"),
         resume = if (args$resume) " -resume" else "",
         extra = if (!is.null(args$extra_args)) str_glue(" {args$extra_args}") else ""
     )

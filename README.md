@@ -1,187 +1,275 @@
-# pgs_batch
+# PGS Batch
 
-A script to run PGS from the PGS Catalog in batches using the `nextflow` pipeline `pgsc_calc` (v2.0.0).
-Uses scoring files from the PGS Catalog downloaded on 2024/05/10 (n=4735).
+A command line tool for computing Polygenic Scores (PGS) from the PGS Catalog in batches using the `pgsc_calc` (v2.0.0) Nextflow pipeline.
+This tool processes scoring files from the PGS Catalog's May 2024 release (n=4,735).
 
-## Dependencies
-- java v8+
-	- If having trouble with java when running the scripts below, export these variables `export JAVA_HOME=/path/to/java` and `export NXF_JAVA_HOME=/path/to/java`, where `/path/to/java` is the directory that contains `bin/java`
-- nextflow
-- R>=4.2 and Rscript
+## Table of Contents
+- [Quick Start](#quick-start)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage Guide](#usage-guide)
+- [Working in Special Environments](#working-in-special-environments)
+- [Troubleshooting](#troubleshooting)
+- [Performance Considerations](#performance-considerations)
 
-## Setup
+## Quick Start
 
 ```bash
+# Clone and set up
 git clone https://github.com/krillinor/pgs_batch.git
 cd pgs_batch
-# install nextflow
-export NXF_HOME=${PWD}/.nextflow
+export NXF_HOME="${PWD}/.nextflow"
 curl -fsSL get.nextflow.io | bash
-# install R packages
+
+# Install dependencies
 Rscript -e 'install.packages(c("docopt", "data.table", "fs", "readr", "curl", "stringr", "purrr"), repos = "http://cran.us.r-project.org")'
+
+# Basic example
+Rscript pgs_batch.R batch --n_per_batch=100
+Rscript pgs_batch.R download --batch_id=1 --target_build=GRCh37
+Rscript pgs_batch.R create_samplesheet --id=my_cohort --genos_path_prefix="/path/to/genotypes/prefix" --format=bfile
+Rscript pgs_batch.R calc --id=my_cohort --target_build=GRCh37 --batch_id=1 --profile=docker
 ```
 
-## Config file
+## Prerequisites
 
-Change memory/cpus/max_forks in the `custom.config` file (details on nextflow/pgsc_calc config [here](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html#how-do-i-run-pgsc-calc-on-larger-datasets-and-more-powerful-computers)).
+### Required Software
+- Java v8 or higher
+  - If experiencing Java issues: `export JAVA_HOME=/path/to/java` and `export NXF_JAVA_HOME=/path/to/java`, where `/path/to/java` is the parent folder containing `bin/java`
+- [Nextflow](https://www.nextflow.io/)
+- R version 4.2 or higher
+- One of: Docker, Singularity, or Conda
 
-## Output
+## Installation
 
-Results will appear in the `results` directory.
-Takes ~1hr to run for 500 PGS (1/10 batches) with the default config file.
-The `runs` directory is temporary and takes a lot of space. Best to remove subdirectories in `runs` after PGS have been computed.
+1. **Clone Repository**
+   ```bash
+   git clone https://github.com/krillinor/pgs_batch.git
+   cd pgs_batch
+   ```
 
-## Example
+2. **Install Nextflow**
+   ```bash
+   export NXF_HOME="${PWD}/.nextflow"
+   curl -fsSL get.nextflow.io | bash
+   ```
 
-### Step 1: Specify number of batches
+3. **Install R Dependencies**
+   ```bash
+   Rscript -e 'install.packages(c("docopt", "data.table", "fs", "readr", "curl", "stringr", "purrr"), repos = "http://cran.us.r-project.org")'
+   ```
 
-Create batches based on available scoring files on 2024/05/10 (n=4735).
-For example, 10 batches (~500 per file).
+## Configuration
 
-```bash
-Rscript pgs_batch.R batch --n_batches=10
+### Basic Configuration
+Create the file `custom.config` to adjust resource allocation.
+
+[See this `pgsc_calc` documentation for examples](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html) and [this `nextflow` documentation for various executors](https://www.nextflow.io/docs/latest/executor.html).
+
+Here's an example.
+
+```nextflow
+process {
+    executor = 'local'
+
+    withLabel:process_low {
+        cpus   = 2
+        memory = 8.GB
+        time   = 1.h
+    }
+    withLabel:process_medium {
+        cpus   = 8
+        memory = 64.GB
+        time   = 4.h
+    }
+    withName: PLINK2_SCORE {
+        maxForks = 4
+    }
+}
+
 ```
 
-### Step 2: Download scoring files
+Or something like this for HPC (SLURM example):
 
-Download scoring files for each batch.
-Specifying the correct build for the target cohort is important (GRCh37/GRCh38).
-Use `--resume` if the download fails.
+```nextflow
+process {
+  errorStrategy = 'retry'
+  maxRetries = 3
+  maxErrors = '-1'
+  executor = 'slurm'
 
+  withName: 'SAMPLESHEET_JSON' {
+    cpus = 1
+    memory = { 1.GB * task.attempt }
+    time = { 1.hour * task.attempt }
+  }
+
+  // etc.
+
+}
+```
+
+(Note: This `pgs_batch` tool has not been tested for cloud executors, but the `pgsc_calc` people have made `pgsc_calc` work on [the cloud](https://pgsc-calc.readthedocs.io/en/latest/how-to/cloud.html)).
+
+### Output Structure
+```
+project_root/
+├── results/          # Final processing results
+├── runs/             # Temporary processing files (can be deleted after completion)
+├── batches/          # Batch definition files
+└── scoringfiles/     # Downloaded scoring files
+```
+
+## Usage Guide
+
+### 1. Create Batches
+
+Split scoring files into manageable batches:
 ```bash
+Rscript pgs_batch.R batch --n_batches=10  # Creates ~500 scores per batch
+# OR
+Rscript pgs_batch.R batch --n_per_batch=100  # Specify exact batch size
+```
+
+### 2. Download Scoring Files
+
+Download files for each batch:
+```bash
+# Single batch
+Rscript pgs_batch.R download --batch_id=1 --target_build=GRCh37
+
+# All batches (using loop)
 for i in {1..10}; do
     Rscript pgs_batch.R download --batch_id=${i} --target_build=GRCh37
 done
 ```
 
-### Step 3: Create the samplesheet
+### 3. Create Samplesheet
 
-Specify the inputs.
-You need to provide the cohort name with `--id` (replace "cohort_name" with the name of your cohort, f.x., "UKB"), the prefix to the genotypes with `--genos_path_prefix`, and the genotype format (vcf/bfile/pfile) with `--format`. Assumes one file per chromosome. If there's a single genotype file, use `--genos_single_file`.
-More details [here](https://pgsc-calc.readthedocs.io/en/latest/how-to/samplesheet.html#setup-samplesheet).
-
+Generate input configuration:
 ```bash
-Rscript pgs_batch.R create_samplesheet --id=cohort_name --genos_path_prefix="/path/to/genotypes/prefix" --format=bfile
+Rscript pgs_batch.R create_samplesheet \
+    --id=cohort_name \
+    --genos_path_prefix="/path/to/genotypes/prefix" \
+    --format=bfile
 ```
 
-Creates the file `samplesheet_cohort_name.csv`:
+Use `--genos_single_file` if the genotype file is not split by chromosomes.
 
-```
-sampleset,path_prefix,chrom,format
-cohort_name,/path/to/genotypes/prefix1,1,bfile
-cohort_name,/path/to/genotypes/prefix2,2,bfile
-cohort_name,/path/to/genotypes/prefix3,3,bfile
-cohort_name,/path/to/genotypes/prefix4,4,bfile
-cohort_name,/path/to/genotypes/prefix5,5,bfile
-cohort_name,/path/to/genotypes/prefix6,6,bfile
-cohort_name,/path/to/genotypes/prefix7,7,bfile
-cohort_name,/path/to/genotypes/prefix8,8,bfile
-cohort_name,/path/to/genotypes/prefix9,9,bfile
-cohort_name,/path/to/genotypes/prefix10,10,bfile
-cohort_name,/path/to/genotypes/prefix11,11,bfile
-cohort_name,/path/to/genotypes/prefix12,12,bfile
-cohort_name,/path/to/genotypes/prefix13,13,bfile
-cohort_name,/path/to/genotypes/prefix14,14,bfile
-cohort_name,/path/to/genotypes/prefix15,15,bfile
-cohort_name,/path/to/genotypes/prefix16,16,bfile
-cohort_name,/path/to/genotypes/prefix17,17,bfile
-cohort_name,/path/to/genotypes/prefix18,18,bfile
-cohort_name,/path/to/genotypes/prefix19,19,bfile
-cohort_name,/path/to/genotypes/prefix20,20,bfile
-cohort_name,/path/to/genotypes/prefix21,21,bfile
-cohort_name,/path/to/genotypes/prefix22,22,bfile
-```
+#### Samplesheet Format
+The tool generates a CSV file (`samplesheet_cohort_name.csv`) containing:
+- `sampleset`: Cohort identifier
+- `path_prefix`: Path to genotype files
+- `chrom`: Chromosome number (1-22)
+- `format`: Genotype format (vcf/bfile/pfile)
 
-### Step 4: Run pgsc_calc for each batch
+### 4. Run Analysis
 
-Run sequentially for each batch (or submit to cluster).
-Specifying the correct build for the target cohort is important (GRCh37/GRCh38).
-Specify docker/singularity/conda with `--profile` based on availability.
-Modify the `custom.config` file to use more/less resources (f.x., if killed because of too little memory).
-Use `--resume` to resume the pipeline from the last completed step (f.x., if it failed somewhere because of too little memory).
-Use `--extra_args` to specify additional parameters, f.x., `--extra_args="  --keep_ambiguous"` to keep ambiguous variants (not recommended) in the matching step (`pgsc_calc` automatically filters them out).
-
+Process each batch:
 ```bash
+# Single batch
+Rscript pgs_batch.R calc \
+    --id=cohort_name \
+    --target_build=GRCh37 \
+    --batch_id=1 \
+    --profile=docker
+
+# All batches
 for i in {1..10}; do
-    Rscript pgs_batch.R calc --id=cohort_name --target_build=GRCh37 --batch_id=${i} --profile=docker
+    Rscript pgs_batch.R calc \
+        --id=cohort_name \
+        --target_build=GRCh37 \
+        --batch_id=${i} \
+        --profile=docker
 done
 ```
 
-## Offline environment
+## Working in Special Environments
 
-If working in an offline environment, run the following steps in an online environment before transferring to the offline environment.
+### Offline Environment Setup
 
-1. Download all scoring files (see Step 2 in the example below).
-2. Download `pgsc_calc` and plugins:
+1. In an online environment:
+   ```bash
+   # Download scoring files
+   Rscript pgs_batch.R download --batch_id=1 --target_build=GRCh37
 
-```bash
-# download pgsc_calc and unzip
-wget https://github.com/PGScatalog/pgsc_calc/archive/refs/tags/v2.0.0.zip
-unzip v2.0.0.zip
+   # Get pgsc_calc
+   wget https://github.com/PGScatalog/pgsc_calc/archive/refs/tags/v2.0.0.zip
+   unzip v2.0.0.zip
 
-export NXF_HOME="${PWD}/.nextflow"
-./nextflow plugin install nf-validation@1.1.3
-./nextflow plugin install nf-schema@2.0.0
-./nextflow plugin install nf-prov@1.2.2
-```
+   # Install plugins
+   export NXF_HOME="${PWD}/.nextflow"
+   ./nextflow plugin install nf-validation@1.1.3
+   ./nextflow plugin install nf-schema@2.0.0
+   ./nextflow plugin install nf-prov@1.2.2
+   ```
 
-3. Download `singularity` containers (also possible for [docker](https://pgsc-calc.readthedocs.io/en/latest/how-to/offline.html#docker)):
+2. Download containers:
+   ```bash
+   cd pgsc_calc-2.0.0
+   export NXF_SINGULARITY_CACHEDIR=nxf_sc
+   mkdir -p $NXF_SINGULARITY_CACHEDIR
+   
+   # Get container list
+   grep 'ext.singularity*' conf/modules.config | cut -f 2 -d '=' | \
+       xargs -L 2 echo | tr -d ' ' > singularity_images.txt
+   
+   # Create paths
+   cat singularity_images.txt | \
+       sed 's/oras:\/\///;s/https:\/\///;s/\//-/g;s/$/.img/;s/:/-/' > \
+       singularity_image_paths.txt
+   
+   # Download containers
+   paste singularity_image_paths.txt singularity_images.txt | \
+       while read -a line; do \
+           singularity pull --disable-cache --dir $NXF_SINGULARITY_CACHEDIR \
+           ${line[0]} ${line[1]}; \
+       done
+   ```
 
-```bash
-cd pgsc_calc-2.0.0
-NXF_SINGULARITY_CACHEDIR=nxf_sc
-mkdir -p $NXF_SINGULARITY_CACHEDIR
-grep 'ext.singularity*' conf/modules.config | cut -f 2 -d '=' | xargs -L 2 echo | tr -d ' ' > singularity_images.txt
-cat singularity_images.txt | sed 's/oras:\/\///;s/https:\/\///;s/\//-/g;s/$/.img/;s/:/-/' > singularity_image_paths.txt
-paste singularity_image_paths.txt singularity_images.txt | while read -a line; do singularity pull --disable-cache --dir $NXF_SINGULARITY_CACHEDIR ${line[0]} ${line[1]}; done
-```
+3. Transfer everything to offline environment
+4. Run with offline flag:
+   ```bash
+   Rscript pgs_batch.R calc --offline ...
+   ```
 
-4. Move everything (the pgs_batch directory) to the offline environment.
-5. Use `--offline` when running `Rscript pgs_batch.R calc`.
+### HPC/Cluster Configuration
 
-## Computing cluster
+[See this `pgsc_calc` documentation for examples](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html) and [this `nextflow` documentation for various executors](https://www.nextflow.io/docs/latest/executor.html).
 
-If using a computing cluster, specify the details in `custom.config` (example for `slurm`):
+## Troubleshooting
 
-```
-process {
-    executor = 'slurm'
-    queue    = 'cpu-short'
+### Common Issues
 
-    withLabel:process_low {
-        cpus   = 2
-        memory = 8.GB
-        time    = 1.h
-    }
-    withLabel:process_medium {
-        cpus     = 4
-        memory   = 16.GB
-        maxForks = 4
-        time     = 4.h
-    }
-    withName: PLINK2_SCORE {
-        maxForks = 22
-    }
-}
+1. **Java Problems**
+   - Set Java environment variables:
+     ```bash
+     export JAVA_HOME=/path/to/java
+     export NXF_JAVA_HOME=/path/to/java
+     ```
+     where `/path/to/java` is the parent folder containing `bin/java`.
 
-executor {
-    name = 'slurm'
-    queueSize = 22
-    submitRateLimit = '10 sec'
-}
-```
+2. **Memory Issues**
+   - Adjust memory per process/label in `custom.config`. See [`pgsc_calc` documentation on memory/cpus](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html) and [nextflow documentation on config files](https://www.nextflow.io/docs/latest/config.html)
+   - the `--max_cpus=16` and `--max_memory=128.GB` are hard caps on available memory for any single process. Adjust if needed.
+   - Use `--resume` flag to restart from last checkpoint
 
-Also, export these variables in the `sbatch` script:
+3. **Download Failures**
+   - Use `--resume` with download command
+   - Check network connectivity
+   - Verify disk space
 
-```
-export NXF_ANSI_LOG=false
-export NXF_OPTS="-Xms1G -Xmx4G"
-```
+## Performance Considerations
 
-## TODOs
+- Storage: `runs` directory requires significant space
+  - Clean up after successful completion
+  - Keep final results in `results` directory
+- Memory usage scales with batch size
+- [Tips for HPC](https://seqera.io/blog/5_tips_for_hpc_users/) and [more tips for HPC](https://seqera.io/blog/5-more-tips-for-nextflow-user-on-hpc/)
 
-- arg checks
-- combine results + QC metrics
-- delete runs subdirs on completion unless flag
-- add install_singularity.sh script
-- use params file
+## Future Improvements
+
+- [ ] Results aggregation and QC metrics
+- [ ] Automatic cleanup of runs subdirectories
+- [ ] Parameter file support
