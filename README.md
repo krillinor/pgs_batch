@@ -268,7 +268,7 @@ done
 
 2. **Memory Issues**
    - Adjust memory per process/label in `custom.config`. See [`pgsc_calc` documentation on memory/cpus](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html) and [nextflow documentation on config files](https://www.nextflow.io/docs/latest/config.html)
-   - the `--max_cpus=16` and `--max_memory=128.GB` are hard caps on available memory for any single process. Adjust if needed.
+   - the `--max_cpus` and `--max_memory` flage are hard caps on available memory for any single process. Adjust if needed.
    - Use `--resume` flag to restart from last checkpoint
 
 3. **Download Failures**
