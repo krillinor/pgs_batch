@@ -18,8 +18,8 @@ DEFAULT_TARGET_BUILD <- "GRCh38"
 DEFAULT_PROFILE <- "singularity"
 DEFAULT_NXF_VERSION <- "24.04.4"
 DEFAULT_PGSC_CALC_VERSION <- "2.0.0"
-DEFAULT_MAX_CPUS <- 16
-DEFAULT_MAX_MEMORY <- "128.GB"
+DEFAULT_MAX_CPUS <- 32
+DEFAULT_MAX_MEMORY <- "256.GB"
 DEFAULT_MIN_OVERLAP <- 0
 
 doc <- str_glue("
@@ -213,7 +213,7 @@ get_ancestry_reference <- function(args) {
 run_calc <- function(args) {
     # Require custom.config file
     if (!file_exists(str_glue("{args$dir}/custom.config"))) {
-        message(str_glue("You have to provide the file {args$dir}/custom.config where you specify resources to run this pipeline.\nSee https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html for more details."))
+        message(str_glue("You have to provide the file {args$dir}/custom.config where you specify the executor and allocated resources to run this pipeline.\nSee https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html for more details."))
     }
 
     # Validate ancestry reference if provided

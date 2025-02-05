@@ -63,11 +63,27 @@ Rscript pgs_batch.R calc --id=my_cohort --target_build=GRCh37 --batch_id=1 --pro
 ## Configuration
 
 ### Basic Configuration
-Create the file `custom.config` to adjust resource allocation.
+Create the file `custom.config` to specify executor and adjust resource allocation.
+
+Minimally, specify the executor. For example,
+
+```nextflow
+process {
+    executor = 'local'
+}
+```
+
+or
+
+```nextflow
+process {
+    executor = 'slurm'
+}
+```
 
 [See this `pgsc_calc` documentation for examples](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html) and [this `nextflow` documentation for various executors](https://www.nextflow.io/docs/latest/executor.html).
 
-Here's an example.
+How to change resource allocation ([base config](https://github.com/PGScatalog/pgsc_calc/blob/main/conf/base.config)):
 
 ```nextflow
 process {
@@ -87,10 +103,9 @@ process {
         maxForks = 4
     }
 }
-
 ```
 
-Or something like this for HPC (SLURM example):
+or for HPC, SLURM ([more here](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html)):
 
 ```nextflow
 process {
@@ -99,18 +114,11 @@ process {
   maxErrors = '-1'
   executor = 'slurm'
 
-  withName: 'SAMPLESHEET_JSON' {
-    cpus = 1
-    memory = { 1.GB * task.attempt }
-    time = { 1.hour * task.attempt }
-  }
-
   // etc.
-
 }
 ```
 
-(Note: This `pgs_batch` tool has not been tested for cloud executors, but the `pgsc_calc` people have made `pgsc_calc` work on [the cloud](https://pgsc-calc.readthedocs.io/en/latest/how-to/cloud.html)).
+(Note: `pgs_batch` has not been tested for cloud executors, but the `pgsc_calc` can work on [the cloud](https://pgsc-calc.readthedocs.io/en/latest/how-to/cloud.html)).
 
 ### Output Structure
 ```
@@ -164,16 +172,23 @@ The tool generates a CSV file (`samplesheet_cohort_name.csv`) containing:
 - `chrom`: Chromosome number (1-22)
 - `format`: Genotype format (vcf/bfile/pfile)
 
-### 4. Run Analysis
+### 5. Download ancestry files (optional)
 
-Process each batch:
+```bash
+Rscript pgs_batch.R get_ancestry_reference --1kg_hgdp
+```
+
+### 6. Run Analysis
+
+Process each batch (remove `--ancestry` flag if ancestry-correction not needed):
 ```bash
 # Single batch
 Rscript pgs_batch.R calc \
     --id=cohort_name \
     --target_build=GRCh37 \
     --batch_id=1 \
-    --profile=docker
+    --profile=docker \
+    --ancestry=full_path_to_file_from_step5
 
 # All batches
 for i in {1..10}; do
@@ -181,7 +196,8 @@ for i in {1..10}; do
         --id=cohort_name \
         --target_build=GRCh37 \
         --batch_id=${i} \
-        --profile=docker
+        --profile=docker \
+        --ancestry=full_path_to_file_from_step5
 done
 ```
 
