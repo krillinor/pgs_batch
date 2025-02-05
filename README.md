@@ -5,7 +5,7 @@ Uses scoring files from the PGS Catalog downloaded on 2024/05/10 (n=4735).
 
 ## Dependencies
 - java v8+
-	- If having trouble with java when running the scripts below, export these variables `export JAVA_HOME=/path/to/java` and `export NXF_JAVA_HOME=/path/to/java`
+	- If having trouble with java when running the scripts below, export these variables `export JAVA_HOME=/path/to/java` and `export NXF_JAVA_HOME=/path/to/java`, where `/path/to/java` is the directory that contains `bin/java`
 - nextflow
 - R>=4.2 and Rscript
 
@@ -15,9 +15,10 @@ Uses scoring files from the PGS Catalog downloaded on 2024/05/10 (n=4735).
 git clone https://github.com/krillinor/pgs_batch.git
 cd pgs_batch
 # install nextflow
+export NXF_HOME=${PWD}/.nextflow
 curl -fsSL get.nextflow.io | bash
 # install R packages
-Rscript -e 'install.packages(c("docopt", "data.table", "fs", "readr", "curl", "stringr"), repos = "http://cran.us.r-project.org")'
+Rscript -e 'install.packages(c("docopt", "data.table", "fs", "readr", "curl", "stringr", "purrr"), repos = "http://cran.us.r-project.org")'
 ```
 
 ## Config file

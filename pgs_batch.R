@@ -1,5 +1,30 @@
-"
+#!/usr/bin/env Rscript
+
+# Load required packages
+suppressPackageStartupMessages({
+    library(docopt)
+    library(stringr)
+    library(fs)
+    library(data.table)
+    library(readr)
+    library(curl)
+    library(purrr)
+})
+
+# Constants
+ALLOWED_TARGET_BUILDS <- c("GRCh37", "GRCh38")
+ALLOWED_FORMATS <- c("vcf", "bfile", "pfile")
+DEFAULT_TARGET_BUILD <- "GRCh38"
+DEFAULT_PROFILE <- "singularity"
+DEFAULT_NXF_VERSION <- "24.04.4"
+DEFAULT_PGSC_CALC_VERSION <- "2.0.0"
+DEFAULT_MAX_CPUS <- 4
+DEFAULT_MAX_MEMORY <- "16.GB"
+DEFAULT_MIN_OVERLAP <- 0
+
+str_glue("
 Usage:
+
   pgs_batch.R batch (--n_batches=<n_batches> | --n_per_batch=<n_per_batch>) [--dir=<dir> --force]
   pgs_batch.R download --batch_id=<batch_id> [--dir=<dir> --target_build=<target_build> --resume]
   pgs_batch.R create_samplesheet --id=<id> --genos_path_prefix=<genos_path_prefix> --format=<format> [--dir=<dir> --genos_single_file]
@@ -17,199 +42,244 @@ Options:
   --n_per_batch=<n_per_batch>              Split into batches that have n_per_batch scoring files.
   --force
   --batch_id=<batch_id>                    Run for specific batch.
-  --target_build=<target_build>            Genome build [default: GRCh38].
+  --target_build=<target_build>            Genome build [default: {DEFAULT_TARGET_BUILD}].
   --resume                                 Resume if something fails.
   --genos_path_prefix=<genos_path_prefix>  Genotype path prefix. Assumes one file per chromosome ending on the chromosome number. Otherwise, use genos_single_file flag (not recommended, slow)
   --format=<format>                        Genotype format: vcf, bfile (plink 1), or pfile (plink 2).
   --genos_single_file
-  --profile=<profile>                      docker, singularity or conda [default: singularity].
-  --min_overlap=<min_overlap>              [default: 0].
-  --max_cpus=<max_cpus>                    [default: 4].
-  --max_memory=<max_memory>                [default: 16.GB].
+  --profile=<profile>                      docker, singularity or conda [default: {DEFAULT_PROFILE}].
+  --min_overlap=<min_overlap>              [default: {DEFAULT_MIN_OVERLAP}].
+  --max_cpus=<max_cpus>                    [default: {DEFAULT_MAX_CPUS}].
+  --max_memory=<max_memory>                [default: {DEFAULT_MAX_MEMORY}].
   --extra_args=<extra_args>                Specify arbitrary pgsc_calc parameters. Details: https://pgsc-calc.readthedocs.io/en/latest/reference/params.html.
   --offline                                Use if working in an offline environment. Make sure to download containers first (see docs).
   --ancestry=<ancestry>                    Run with continuous ancestry adjustment. Provide a full path to the reference file as argument, e.g. /path/to/pgsc_HGDP+1kGP_v1.tar.zst. Run get_ancestry_reference option to download reference files.
   --1kg                                    Download 1kg reference dataset in get_ancestry_reference
   --1kg_hgdp                               Download 1kg+hgdp reference dataset in get_ancestry_reference
   --singularity_bin=<singularity_bin>      Singularity binary.
-  --nxf_ver=<nxf_ver>                      Nextflow version [default: 24.04.4]
-  --pgsc_calc_version=<pgsc_calc_version>  pgsc_calc version [default: 2.0.0]
+  --nxf_ver=<nxf_ver>                      Nextflow version [default: {DEFAULT_NXF_VERSION}]
+  --pgsc_calc_version=<pgsc_calc_version>  pgsc_calc version [default: {DEFAULT_PGSC_CALC_VERSION}]
   --nxf_cachedir=<nxf_cachedir>            Cache directory for nextflow.
 
-" -> doc
+") -> doc
 
-library(docopt)
-a <- docopt(doc)
 
-if (is.null(a$dir)) {
-    a$dir <- getwd()
-}
+#' Initialize directories and environment
+#' @param args Parsed command line arguments
+#' @return Modified args with initialized paths
+initialize_environment <- function(args) {
+    # Set working directory
+    args$dir <- args$dir %||% getwd()
 
-fs::dir_create(stringr::str_glue("{a$dir}/batches"))
-fs::dir_create(stringr::str_glue("{a$dir}/results"))
-fs::dir_create(stringr::str_glue("{a$dir}/runs"))
-fs::dir_create(stringr::str_glue("{a$dir}/scoringfiles"))
+    # Create required directories
+    dirs <- c("batches", "results", "runs", "scoringfiles")
+    walk(dirs, ~ dir_create(file.path(args$dir, .x)))
 
-if (!is.null(a$singularity_bin)) {
-    system(stringr::str_glue("alias singularity='{singularity_bin}'"))
-}
-
-nextflow <- stringr::str_glue("export NXF_VER=\"{a$nxf_ver}\"; {a$dir}/nextflow")
-pgsc_calc_version <- a$pgsc_calc_version
-
-if (is.null(a$nxf_cachedir)) {
-    cachedir <- stringr::str_glue("{a$dir}/cache_{pgsc_calc_version}")
-} else {
-    cachedir <- a$nxf_cachedir
-    if (!fs::dir_exists(cachedir)) {
-        stop(str_glue("The cache directory {cachedir} does not exists."))
+    # Set up singularity if specified
+    if (!is.null(args$singularity_bin)) {
+        system2("alias", args = str_glue("singularity='{args$singularity_bin}'"))
     }
-}
-if (!a$offline) {
-    system(stringr::str_glue("export NXF_SINGULARITY_CACHEDIR={cachedir}"))
-}
 
-pgsc_calc <- stringr::str_glue("pgscatalog/pgsc_calc -r v{pgsc_calc_version}")
+    # Configure nextflow environment
+    args$nextflow <- str_glue("export NXF_VER=\"{args$nxf_ver %||% DEFAULT_NXF_VERSION}\"; {args$dir}/nextflow")
+    args$pgsc_calc_version <- args$pgsc_calc_version %||% DEFAULT_PGSC_CALC_VERSION
+    args$pgsc_calc <- str_glue("pgscatalog/pgsc_calc -r v{args$pgsc_calc_version}")
 
-if (a$offline) {
-    if (!fs::dir_exists(stringr::str_glue("{a$dir}/pgsc_calc-{pgsc_calc_version}"))) {
-        stop(str_glue("pgsc_calc-{pgsc_calc_version} directory doesn't exist. Follow the docs (under 'Offline')"))
+    # Set up cache directory
+    args$cachedir <- args$nxf_cachedir %||% str_glue("{args$dir}/cache_{args$pgsc_calc_version}")
+    if (!is.null(args$nxf_cachedir) && !dir_exists(args$nxf_cachedir)) {
+        stop(str_glue("The cache directory {args$nxf_cachedir} does not exist."))
     }
-    nxf_sc_export <- stringr::str_glue("export NXF_SINGULARITY_CACHEDIR={a$dir}/pgsc_calc-{pgsc_calc_version}/nxf_sc")
-    pgsc_calc <- stringr::str_glue("{a$dir}/pgsc_calc-{pgsc_calc_version}/main.nf")
+
+    if (args$offline) {
+        if (!dir_exists(str_glue("{args$dir}/pgsc_calc-{pgsc_calc_version}"))) {
+            stop(str_glue("pgsc_calc-{pgsc_calc_version} directory doesn't exist. Follow the docs (under 'Offline')"))
+        }
+        # TODO check if nxf_sc exists
+        system(str_glue("export NXF_SINGULARITY_CACHEDIR={args$dir}/pgsc_calc-{pgsc_calc_version}/nxf_sc"))
+        args$pgsc_calc <- str_glue("{args$dir}/pgsc_calc-{pgsc_calc_version}/main.nf")
+    } else {
+        system(str_glue("export NXF_SINGULARITY_CACHEDIR={args$cachedir}"))
+    }
+
+    args
 }
 
-pgsc_calc_metadata <- stringr::str_glue("{a$dir}/pgs_all_metadata_scores_20240510.csv")
 
-run_batch <- function(a) {
-    metadata <- data.table::fread(pgsc_calc_metadata)
+#' Process batches of PGS scoring files
+#' @param args Command line arguments
+#' @return NULL
+run_batch <- function(args) {
+    metadata <- fread(file.path(args$dir, "pgs_all_metadata_scores_20240510.csv"))
     pgs_ids <- metadata[[1]]
+    dir_batches <- file.path(args$dir, "batches")
 
-    dir_batches <- stringr::str_glue("{a$dir}/batches")
-
-    if (length(fs::dir_ls(dir_batches)) > 0) {
-        if (a$force) {
-            fs::dir_delete(dir_batches)
-            fs::dir_create(dir_batches)
+    # Check if batches directory needs clearing
+    if (length(dir_ls(dir_batches)) > 0) {
+        if (args$force) {
+            dir_delete(dir_batches)
+            dir_create(dir_batches)
         } else {
-            stop(stringr::str_glue("Do you want to overwrite the files in {dir_batches}? Use --force to overwrite"))
+            stop(str_glue("Directory {dir_batches} not empty. Use --force to overwrite"))
         }
     }
 
-    cat(stringr::str_glue("Batching... Outputting in {dir_batches}"), "\n", sep = "")
+    message(str_glue("Batching... Output directory: {dir_batches}"))
 
-    if (!is.null(a$n_per_batch)) {
-        batches <- split(pgs_ids, ceiling(seq_along(pgs_ids) / as.numeric(a$n_per_batch)))
+    # Create batches based on specified method
+    batches <- if (!is.null(args$n_per_batch)) {
+        split(pgs_ids, ceiling(seq_along(pgs_ids) / as.numeric(args$n_per_batch)))
     } else {
-        batches <- split(pgs_ids, cut(seq_along(pgs_ids), as.numeric(a$n_batches), labels = FALSE))
+        split(pgs_ids, cut(seq_along(pgs_ids), as.numeric(args$n_batches), labels = FALSE))
     }
 
-    for (i in 1:length(batches)) {
-        readr::write_lines(batches[[i]], stringr::str_glue("{dir_batches}/batch{i}"))
-    }
+    # Write batch files
+    iwalk(batches, ~ write_lines(.x, file.path(dir_batches, str_glue("batch{.y}"))))
 }
 
-get_api_paths <- function(pgs_ids, target_build) {
-    pgs_paths <- stringr::str_glue("https://ftp.ebi.ac.uk/pub/databases/spot/pgs/scores/{pgs_ids}/ScoringFiles/Harmonized/{pgs_ids}_hmPOS_{a$target_build}.txt.gz")
+
+#' Download PGS scoring files
+#' @param args Command line arguments
+#' @return NULL
+run_download <- function(args) {
+    if (!args$target_build %in% ALLOWED_TARGET_BUILDS) {
+        stop(str_glue("Invalid target build. Must be one of: {paste(ALLOWED_TARGET_BUILDS, collapse = '/')}"))
+    }
+
+    dir_scoringfiles <- file.path(args$dir, "scoringfiles", str_glue("batch{args$batch_id}"))
+    dir_create(dir_scoringfiles)
+
+    batch <- read_lines(file.path(args$dir, "batches", str_glue("batch{args$batch_id}")))
+
+    # Generate download paths and perform downloads
+    pgs_paths <- str_glue("https://ftp.ebi.ac.uk/pub/databases/spot/pgs/scores/{batch}/ScoringFiles/Harmonized/{batch}_hmPOS_{args$target_build}.txt.gz")
+    destfiles <- file.path(dir_scoringfiles, basename(pgs_paths))
+
+    multi_download(pgs_paths, destfiles = destfiles, resume = args$resume)
 }
 
-run_download <- function(a) {
-    allowed_target_builds <- c("GRCh37", "GRCh38")
-    if (!a$target_build %in% allowed_target_builds) {
-        stop("--target_build has to be paste(allowed_target_builds, collapse = '/')")
+
+#' Create sample sheet for analysis
+#' @param args Command line arguments
+#' @return NULL
+create_samplesheet <- function(args) {
+    if (!args$format %in% ALLOWED_FORMATS) {
+        stop(str_glue("Invalid format. Must be one of: {paste(ALLOWED_FORMATS, collapse = '/')}"))
     }
-    batch_id <- a$batch_id
-    resume <- a$resume
 
-    dir_scoringfiles <- stringr::str_glue("{a$dir}/scoringfiles/batch{a$batch_id}")
-    fs::dir_create(dir_scoringfiles)
-
-    batch_path <- stringr::str_glue("{a$dir}/batches/batch{batch_id}")
-    batch <- readr::read_lines(batch_path)
-    pgs_paths <- get_api_paths(batch, a$target_build)
-    destfiles <- stringr::str_glue("{dir_scoringfiles}/{fs::path_file(pgs_paths)}")
-    curl::multi_download(pgs_paths, destfiles = destfiles, resume = resume)
-}
-
-create_samplesheet <- function(a) {
-    allowed_formats <- c("vcf", "bfile", "pfile")
-    if (!a$format %in% allowed_formats) {
-        stop("--format has to be paste(allowed_formats, collapse = '/')")
-    }
-    if (a$genos_single_file) {
-        path_prefix <- a$genos_path_prefix
-        chrom <- NA
+    # Prepare sample sheet data
+    if (args$genos_single_file) {
+        samplesheet <- data.frame(
+            sampleset = args$id,
+            path_prefix = args$genos_path_prefix,
+            chrom = NA,
+            format = args$format
+        )
     } else {
-        path_prefix <- stringr::str_glue("{a$genos_path_prefix}{1:22}")
-        chrom <- 1:22
+        samplesheet <- data.frame(
+            sampleset = args$id,
+            path_prefix = str_glue("{args$genos_path_prefix}{1:22}"),
+            chrom = 1:22,
+            format = args$format
+        )
     }
 
-    samplesheet <- data.frame(sampleset = a$id, path_prefix = path_prefix, chrom = chrom, format = a$format)
-
-    out_path <- stringr::str_glue("{a$dir}/samplesheet_{a$id}.csv")
-    cat(stringr::str_glue("Writing samplesheet file to {out_path}"), "\n", sep = "")
-    data.table::fwrite(samplesheet, out_path, sep = ",")
+    # Write sample sheet
+    out_path <- file.path(args$dir, str_glue("samplesheet_{args$id}.csv"))
+    message(str_glue("Writing sample sheet to {out_path}"))
+    fwrite(samplesheet, out_path)
 }
 
-get_ancestry_reference <- function(a) {
-    if (a$`1kg`) {
-        download_path <- "https://ftp.ebi.ac.uk/pub/databases/spot/pgs/resources/pgsc_1000G_v1.tar.zst"
-        cat(stringr::str_glue("Downloading 1kg reference dataset at {download_path}"), "\n", sep = "")
+
+#' Download ancestry reference data
+#' @param args Command line arguments
+#' @return NULL
+get_ancestry_reference <- function(args) {
+    download_path <- if (args$`1kg`) {
+        "https://ftp.ebi.ac.uk/pub/databases/spot/pgs/resources/pgsc_1000G_v1.tar.zst"
+    } else if (args$`1kg_hgdp`) {
+        "https://ftp.ebi.ac.uk/pub/databases/spot/pgs/resources/pgsc_HGDP+1kGP_v1.tar.zst"
     }
-    if (a$`1kg_hgdp`) {
-        download_path <- "https://ftp.ebi.ac.uk/pub/databases/spot/pgs/resources/pgsc_HGDP+1kGP_v1.tar.zst"
-        cat(stringr::str_glue("Downloading 1kg+hgdp reference dataset at {download_path}"), "\n", sep = "")
-    }
-    destfile <- stringr::str_glue("{a$dir}/{basename(download_path)}")
-    curl::curl_download(url = download_path, destfile = destfile)
+
+    message(str_glue("Downloading reference dataset: {download_path}"))
+    destfile <- file.path(args$dir, basename(download_path))
+    curl_download(url = download_path, destfile = destfile)
 }
 
-run_calc <- function(a) {
-    if (!is.null(a$ancestry)) {
-        if (!fs::file_exists(a$ancestry)) {
-            stop(stringr::str_glue("The ancestry refernce file does not exists"))
-        }
-        pgsc_calc_run_ancestry <- stringr::str_glue(" --run_ancestry {a$ancestry}")
-    } else {
-        pgsc_calc_run_ancestry <- ""
+
+#' Run PGS calculation
+#' @param args Command line arguments
+#' @return NULL
+run_calc <- function(args) {
+    # Validate ancestry reference if provided
+    if (!is.null(args$ancestry) && !file_exists(args$ancestry)) {
+        stop("Ancestry reference file does not exist")
     }
 
-    pgsc_calc_input <- stringr::str_glue("{a$dir}/samplesheet_{a$id}.csv")
-    pgsc_calc_scores <- stringr::str_glue("--scorefile \"{a$dir}/scoringfiles/batch{a$batch_id}/*{a$target_build}.txt.gz\"")
+    # Prepare directories
+    dir_runs <- file.path(args$dir, "runs", args$id, str_glue("batch{args$batch_id}"))
+    dir_results <- file.path(args$dir, "results", args$id, str_glue("batch{args$batch_id}"))
+    dir_create(dir_runs)
 
-    pgsc_calc_custom_config <- stringr::str_glue(" -c {a$dir}/custom.config")
-    pgsc_calc_resume <- ifelse(a$resume, " -resume", "")
-    pgsc_calc_extra_args <- ifelse(!is.null(a$extra_args), stringr::str_glue(" {a$extra_args}"), "")
+    # Build command components
+    cmd_components <- list(
+        ancestry = if (!is.null(args$ancestry)) str_glue(" --run_ancestry {args$ancestry}") else "",
+        input = str_glue("{args$dir}/samplesheet_{args$id}.csv"),
+        scores = str_glue("--scorefile \"{args$dir}/scoringfiles/batch{args$batch_id}/*{args$target_build}.txt.gz\""),
+        # TODO error if no config file specified
+        config = if (args$custom_config) str_glue(" -c {args$dir}/custom.config") else "",
+        resume = if (args$resume) " -resume" else "",
+        extra = if (!is.null(args$extra_args)) str_glue(" {args$extra_args}") else ""
+    )
 
-    dir_runs <- stringr::str_glue("{a$dir}/runs/{a$id}/batch{a$batch_id}")
-    dir_results <- stringr::str_glue("{a$dir}/results/{a$id}/batch{a$batch_id}")
-    fs::dir_create(dir_runs)
+    # Set up offline mode if needed
+    if (args$offline) {
+        offline_setup <- c(
+            str_glue("export NXF_OFFLINE='true'"),
+            str_glue("export NXF_HOME={args$dir}/.nextflow"),
+            str_glue("export NXF_SINGULARITY_CACHEDIR={args$dir}/pgsc_calc-{args$pgsc_calc_version}/nxf_sc")
+        )
+    }
 
-    system(stringr::str_glue("cp -R {a$dir}/.nextflow {dir_runs}/.nextflow"))
+    # Build and execute command
+    cmd <- str_glue(
+        "{if(args$offline) paste(offline_setup, collapse = '; ')}",
+        "{args$nextflow} run {args$pgsc_calc}",
+        "-profile {args$profile}",
+        "--input {cmd_components$input}",
+        "{cmd_components$scores}",
+        "--target_build {args$target_build}",
+        "--outdir {dir_results}",
+        "--min_overlap {args$min_overlap %||% DEFAULT_MIN_OVERLAP}",
+        "--fast_match --parallel",
+        "--max_cpus {args$max_cpus %||% DEFAULT_MAX_CPUS}",
+        "--max_memory {args$max_memory %||% DEFAULT_MAX_MEMORY}",
+        "{cmd_components$config}",
+        "{cmd_components$resume}",
+        "{cmd_components$ancestry}",
+        "{cmd_components$extra}"
+    )
+
+    # Execute command
     setwd(dir_runs)
-
-    cmd_pgsc_calc <- stringr::str_glue("{nextflow} run {pgsc_calc} -profile {a$profile} --input {pgsc_calc_input} {pgsc_calc_scores} --target_build {a$target_build} --outdir {dir_results} --min_overlap {a$min_overlap} --fast_match --parallel --max_cpus {a$max_cpus} --max_memory {a$max_memory}{pgsc_calc_custom_config}{pgsc_calc_resume}{pgsc_calc_run_ancestry}{pgsc_calc_extra_args}")
-    if (a$offline) {
-        nxf_offline <- stringr::str_glue("export NXF_OFFLINE='true'")
-        nxf_home_export <- stringr::str_glue("export NXF_HOME={a$dir}/.nextflow")
-        cmd_pgsc_calc <- stringr::str_glue("{nxf_offline}; {nxf_home_export}; {nxf_sc_export}; {cmd_pgsc_calc}")
-    }
-
-    system(cmd_pgsc_calc)
+    system2("cp", args = c("-R", file.path(args$dir, ".nextflow"), file.path(dir_runs, ".nextflow")))
+    system(cmd)
 }
 
-if (a$batch) {
-    run_batch(a)
+
+# Main execution
+main <- function() {
+    args <- docopt(doc)
+    args <- initialize_environment(args)
+
+    # Execute requested command
+    if (args$batch) run_batch(args)
+    if (args$download) run_download(args)
+    if (args$create_samplesheet) create_samplesheet(args)
+    if (args$calc) run_calc(args)
+    if (args$get_ancestry_reference) get_ancestry_reference(args)
 }
-if (a$download) {
-    run_download(a)
-}
-if (a$create_samplesheet) {
-    create_samplesheet(a)
-}
-if (a$calc) {
-    run_calc(a)
-}
-if (a$get_ancestry_reference) {
-    get_ancestry_reference(a)
+
+if (!interactive()) {
+    main()
 }
