@@ -73,7 +73,7 @@ process {
 }
 ```
 
-or
+or (for example)
 
 ```nextflow
 process {
@@ -83,7 +83,7 @@ process {
 
 [See this `pgsc_calc` documentation for examples](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html) and [this `nextflow` documentation for various executors](https://www.nextflow.io/docs/latest/executor.html).
 
-How to change resource allocation ([base config](https://github.com/PGScatalog/pgsc_calc/blob/main/conf/base.config)):
+How to change resource allocation (see [base config](https://github.com/PGScatalog/pgsc_calc/blob/main/conf/base.config)):
 
 ```nextflow
 process {
@@ -105,7 +105,7 @@ process {
 }
 ```
 
-or for HPC, SLURM ([more here](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html)):
+or for HPC, SLURM (see [more here](https://pgsc-calc.readthedocs.io/en/latest/how-to/bigjob.html)):
 
 ```nextflow
 process {
